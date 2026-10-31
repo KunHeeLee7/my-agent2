@@ -36,6 +36,7 @@ if prompt := st.chat_input("환율이나 환산할 금액을 질문해 보세요
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
+        client = None
         if not os.getenv("OPENAI_API_KEY"):
             answer = "`.env` 파일에 OPENAI_API_KEY를 설정해 주세요."
         else:
@@ -49,10 +50,10 @@ if prompt := st.chat_input("환율이나 환산할 금액을 질문해 보세요
                                 "사용자의 환율 질문에서 기준 통화, 대상 통화와 금액을 추출하세요. "
                                 "통화는 ISO 4217 세 글자 코드로 변환하세요. 환율만 묻고 금액이 없으면 1을 사용하세요. "
                                 "명확하지 않거나 환율과 무관한 질문은 추측하지 말고 clarification에 한국어로 되물으세요. "
+                                "이전 대화를 참고해 생략된 통화나 금액을 해석하세요. "
                                 "필요한 값이 없으면 해당 필드를 null로 설정하세요. 환율을 직접 추측하지 마세요."
                             )},
-                            {"role": "user", "content": prompt},
-                        ],
+                        ] + st.session_state.messages,
                         text_format=ExchangeQuestion,
                     )
                     question = response.output_parsed
@@ -92,5 +93,35 @@ if prompt := st.chat_input("환율이나 환산할 금액을 질문해 보세요
             except (requests.RequestException, ValueError, KeyError, TypeError):
                 answer = "환율을 조회하지 못했습니다. 통화 코드와 네트워크 연결을 확인해 주세요."
 
-        st.markdown(answer)
+        if client is not None:
+            try:
+                stream = client.responses.create(
+                    model="gpt-5.4-mini",
+                    input=[
+                        {"role": "system", "content": (
+                            "당신은 환율 챗봇입니다. 아래 조회 결과를 한국어로 친절하게 전달하세요. "
+                            "숫자, 통화, 날짜와 주의사항을 그대로 유지하고 새 환율을 만들지 마세요. "
+                            "조회 결과가 오류나 추가 질문이면 그 내용을 그대로 안내하세요."
+                        )},
+                        {"role": "user", "content": f"사용자 질문: {prompt}\n조회 결과: {answer}"},
+                    ],
+                    stream=True,
+                )
+
+                def text_stream():
+                    for event in stream:
+                        if event.type == "response.output_text.delta":
+                            yield event.delta
+                        elif event.type in ("error", "response.failed"):
+                            raise RuntimeError("응답 스트리밍 실패")
+
+                displayed = st.write_stream(text_stream())
+                if isinstance(displayed, str) and displayed:
+                    answer = displayed
+                else:
+                    st.markdown(answer)
+            except (openai.APIError, RuntimeError):
+                st.markdown(answer)
+        else:
+            st.markdown(answer)
         st.session_state.messages.append({"role": "assistant", "content": answer})
